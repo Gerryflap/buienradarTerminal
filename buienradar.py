@@ -1,7 +1,10 @@
 from PIL import Image
 import subprocess
 import time
+import datetime
 import os
+import io
+import threading
 
 # Set the image size constants used in drawing and getting the image
 image_size = (70 * 2, 55)
@@ -22,7 +25,7 @@ def draw_gif(image):
     rgb_im = image.convert('RGB')
 
     # Append newlines so we can't see the old frame
-    out = "\n" * 25
+    out = "\n" * 27
 
     # Generate the image string
     for y in range(image_height):
@@ -69,26 +72,59 @@ def get_closest_color(rgb):
     # Return the closest ANSI value
     return closest
 
+def format_time_diff(previous_time):
+    current_time = datetime.datetime.now()
+    time_diff = current_time - previous_time
 
-# Download the image
-subprocess.check_call(
-    ["wget", "http://api.buienradar.nl/image/1.0/RadarMapNL?w=%i&h=%i" % image_size, "-O", "temp.gif"],
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    seconds_diff = time_diff.total_seconds()
+    if seconds_diff < 60:
+        time_ago = int(seconds_diff)
+        unit = "seconden"
+    else:
+        minutes_diff = seconds_diff / 60
+        time_ago = int(minutes_diff)
+        unit = "minuten"
 
-# Let's hope wget doesn't give an error, a good programmer might check for this.
-img = Image.open("temp.gif")
+    return f"Beelden {time_ago} {unit} geleden opgehaald"
 
-# Set the time between frames in seconds
-frame_time = 1
 
-# Draw loop, can be quit with Ctrl + c
+# loop to render everything that needs to be displayed on the screen
+def render(img, is_thread_active, last_data_received_datetime):
+    frame_time = 1
+    while is_thread_active:
+        draw_gif(img)
+        print(format_time_diff(last_data_received_datetime))
+        time.sleep(frame_time)
+
+# amount of seconds between buienradar api calls
+GIF_GET_INTERVAL_SECONDS = 120
+thread = threading.Thread()
 try:
     while True:
-        draw_gif(img)
-        time.sleep(frame_time)
+        last_data_received_datetime = datetime.datetime.now()
+        # Get buienradar gif from the api, write to STDOUT
+        gif_get_process = subprocess.Popen(
+            ["wget", "http://api.buienradar.nl/image/1.0/RadarMapNL?w=%i&h=%i" % image_size, "--output-document=-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+        # make a stream from the wget process stdout bytes, and create a PIL image
+        image_bytes = gif_get_process.stdout.read()
+        image_stream = io.BytesIO()
+        image_stream.write(image_bytes)
+        img = Image.open(image_stream)
+
+        # spawn a thread that renders the image to terminal while the main thread sleeps
+        is_thread_active = True
+        thread = threading.Thread(target=render, args=(img, is_thread_active, last_data_received_datetime))
+        thread.start()
+        
+        time.sleep(GIF_GET_INTERVAL_SECONDS)
+        is_thread_active = False
+        if thread.is_alive():
+            thread.join()
+        
 except KeyboardInterrupt:
     print("\033[0m\nShutting Down!")
-
-# Close and remove temp gif file
-img.close()
-os.remove("temp.gif")
+    is_thread_active = False
+    if thread.is_alive():
+        thread.join()
